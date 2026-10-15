@@ -628,7 +628,7 @@ from iidx_display_settings import load_settings, settings_path, history_visible,
 from iidx_history_overlay import DirectHistoryOverlay
 from iidx_play_end_detector import EndDetector
 
-GET_READY_SCALES = (1.04,)
+GET_READY_SCALES = (1.00,)
 
 # Empirically stable 1P GET READY position is around top-left (94, 525).
 # Search a deliberately generous local ROI around it.

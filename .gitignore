@@ -44,3 +44,6 @@ Thumbs.db
 
 # Game-derived template images (not included in source repository)
 /templates/
+
+# Template wizard backups
+/template_wizard_backup/

@@ -12,7 +12,7 @@ import threading
 import tkinter as tk
 from collections import deque
 from pathlib import Path
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 from iidx_paths import app_root
 BASE = app_root()
@@ -145,6 +145,19 @@ class Launcher:
         self.register_hotkeys()
         self.root.after(80, self.poll)
         self.begin_tesseract_check()
+        self.root.after(350, self.check_initial_templates)
+
+    def check_initial_templates(self):
+        missing = [name for name, _, _ in TEMPLATE_STEPS if not (BASE / "templates" / name).is_file()]
+        if not missing:
+            return
+        if len(missing) == len(TEMPLATE_STEPS):
+            msg = "テンプレート画像がありません。"
+        else:
+            msg = "以下のテンプレート画像がありません。\n\n" + "\n".join(missing)
+        msg += "\n\nゲーム画面のスクリーンショットを利用者自身で用意してください。\n\nテンプレートを登録しますか？"
+        if messagebox.askyesno("テンプレート初期設定", msg, parent=self.root):
+            self.open_template_wizard()
 
     def begin_tesseract_check(self):
         if self.tesseract_checking:
@@ -225,6 +238,10 @@ class Launcher:
 
     def start(self):
         if not self.tesseract_ready:
+            return
+        missing = [name for name, _, _ in TEMPLATE_STEPS if not (BASE / 'templates' / name).is_file()]
+        if missing:
+            messagebox.showwarning('テンプレート不足', 'テンプレートが不足しています。設定から登録してください。\n' + '\n'.join(missing), parent=self.root)
             return
         if self.proc and self.proc.poll() is None:
             return
@@ -391,16 +408,20 @@ class Launcher:
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             self.events.put(('line', f'[LAUNCHER] 停止エラー: {exc}'))
 
+    def open_template_wizard(self):
+        TemplateWizard(self.root)
+
     def open_settings(self):
         win = tk.Toplevel(self.root)
         win.title('IIDX 設定ランチャー')
-        win.geometry('440x370')
+        win.geometry('440x420')
         win.transient(self.root)
         frame = ttk.Frame(win, padding=20)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text='設定ツール', font=('', 14, 'bold')).pack(anchor='w', pady=(0, 14))
         for label, path in TOOLS:
             ttk.Button(frame, text=label, command=lambda p=path: self.launch_tool(p)).pack(fill='x', pady=5)
+        ttk.Button(frame, text='テンプレート作成ウィザード', command=self.open_template_wizard).pack(fill='x', pady=5)
 
         # Spout sender name: selectable/copyable, but not editable.
         spout_frame = ttk.LabelFrame(frame, text='Spout接続名', padding=(10, 8))
@@ -460,6 +481,246 @@ class Launcher:
         if self.hotkey_thread is not None:
             self.hotkey_thread.join(timeout=1.0)
         self.root.destroy()
+
+
+# Coordinates are (left, top, right, bottom) for 1920x1080 screenshots.
+TEMPLATE_STEPS = (
+    ('PLAYER_01_SIDE.png', (12, 959, 139, 968), 'ゲーム起動後の「プレーサイドを選択してください」画面のスクリーンショットを選択'),
+    ('PLAYER_02_SIDE.png', (1781, 959, 1908, 968), 'ゲーム起動後の「プレーサイドを選択してください」画面のスクリーンショットを選択'),
+    ('NO_ENTRY.png', (1828, 959, 1908, 968), 'プレースタイル選択後の「プレーヤーエントリー」画面のスクリーンショットを選択'),
+    ('OP_CURRENT_SCORE.png', (551, 873, 747, 911), '選曲後のプレー開始前(GET READY表示前)画面のスクリーンショットを選択'),
+    ('SCRATCH.png', (21, 729, 162, 870), '選曲後のプレー開始前(GET READY表示前)画面のスクリーンショットを選択'),
+    ('GET_READY.png', (93, 525, 488, 557), 'プレー開始直前のGET READYが表示されている画面のスクリーンショットを選択'),
+    ('Op.MIRROR.png', (618, 914, 686, 934), 'MIRRORオプションを使用しているプレー画面のスクリーンショットを選択'),
+    ('Op.RANDOM.png', (619, 914, 687, 934), 'RANDOMオプションを使用しているプレー画面のスクリーンショットを選択'),
+    ('Op.R-.png', (608, 914, 631, 934), 'R-RANDOMオプションを使用しているプレー画面のスクリーンショットを選択'),
+    ('Op.S-.png', (608, 914, 631, 934), 'S-RANDOMオプションを使用しているプレー画面のスクリーンショットを選択'),
+    ('Bridge_to_Result.png', (0, 0, 1920, 1080), 'プレー終了後～リザルト画面の間の、黒背景の中央に青い輪の画面のスクリーンショットを選択'),
+    ('Failed_to_Bridge.png', (0, 0, 1920, 1080), 'プレー途中終了直後の、赤背景画面のスクリーンショットを選択'),
+)
+
+# Existing main program's anchor coordinates. Offsets are relative to 1P/left.
+SCORE_ANCHORS = {('1P', 'left'): (551, 873), ('1P', 'right'): (1512, 873),
+                 ('2P', 'left'): (10, 873), ('2P', 'right'): (971, 873)}
+
+
+class TemplateWizard:
+    def __init__(self, parent):
+        try:
+            from PIL import Image, ImageTk, ImageDraw
+        except ImportError:
+            messagebox.showerror('Pillow required', 'Install Pillow: python -m pip install pillow', parent=parent)
+            return
+        self.Image, self.ImageTk, self.ImageDraw = Image, ImageTk, ImageDraw
+        self.index = 0
+        self.image = None
+        self.image_path = None
+        self.offsets = {}
+        self.photos = {}
+        self.side = tk.StringVar(value='1P')
+        self.graph = tk.StringVar(value='left')
+        self.out_dir = BASE / 'templates'
+        self.win = tk.Toplevel(parent)
+        self.win.title('テンプレート作成ウィザード')
+        self.win.geometry('1050x820')
+        self.win.minsize(1050, 820)
+        self.win.transient(parent)
+        frame = ttk.Frame(self.win, padding=12)
+        frame.pack(fill='both', expand=True)
+        options = ttk.Frame(frame)
+        options.pack(fill='x')
+        ttk.Label(options, text='プレーサイド:').pack(side='left')
+        for value in ('1P', '2P'):
+            ttk.Radiobutton(options, text=value, variable=self.side, value=value, command=self.refresh).pack(side='left', padx=5)
+        ttk.Label(options, text='    スコアグラフ:').pack(side='left')
+        for value, label in (('left', '左'), ('right', '右')):
+            ttk.Radiobutton(options, text=label, variable=self.graph, value=value, command=self.refresh).pack(side='left', padx=5)
+        self.step_label = ttk.Label(frame, font=('', 13, 'bold'))
+        self.step_label.pack(anchor='w', pady=(8, 0))
+        self.note_label = ttk.Label(frame)
+        self.note_label.pack(anchor='w')
+        chooser = ttk.Frame(frame)
+        chooser.pack(fill='x', pady=6)
+        ttk.Button(chooser, text='スクリーンショットを開く (1920x1080)', command=self.choose_image).pack(side='left')
+        self.source_label = ttk.Label(chooser, text='画像未選択')
+        self.source_label.pack(side='left', padx=10)
+        # Fixed screenshot viewport: image dimensions must not resize the layout.
+        screenshot_area = ttk.Frame(frame, width=1000, height=380)
+        screenshot_area.pack(fill='x')
+        screenshot_area.pack_propagate(False)
+        self.full_image = ttk.Label(screenshot_area, text='ここにスクリーンショットを表示', anchor='center')
+        self.full_image.place(relx=0.5, rely=0.5, anchor='center')
+        self.coord_label = ttk.Label(frame)
+        self.coord_label.pack(anchor='w', pady=3)
+        controls = ttk.Frame(frame)
+        controls.pack(fill='x', pady=3)
+        for label, dx, dy in [('← 1px', -1, 0), ('→ 1px', 1, 0), ('↑ 1px', 0, -1), ('↓ 1px', 0, 1)]:
+            ttk.Button(controls, text=label, command=lambda x=dx, y=dy: self.move(x, y)).pack(side='left', padx=3)
+        ttk.Button(controls, text='位置リセット', command=self.reset).pack(side='left', padx=8)
+        # Equal fixed-size preview panels, unaffected by image aspect ratio.
+        compare = ttk.Frame(frame, height=155)
+        compare.pack(side='top', fill='x', pady=8)
+        compare.pack_propagate(False)
+        compare.columnconfigure(0, weight=1, uniform='preview')
+        compare.columnconfigure(2, weight=1, uniform='preview')
+        compare.rowconfigure(0, weight=1)
+        left = ttk.LabelFrame(compare, text='登録済み画像 (templates)', padding=6)
+        left.grid(row=0, column=0, sticky='nsew')
+        self.registered_status = tk.Label(left, text='', anchor='w')
+        self.registered_status.pack(fill='x')
+        registered_area = ttk.Frame(left, height=110)
+        registered_area.pack(fill='both', expand=True)
+        registered_area.pack_propagate(False)
+        self.registered_preview = ttk.Label(registered_area, text='未登録', anchor='center')
+        self.registered_preview.place(relx=0.5, rely=0.5, anchor='center')
+        arrow = ttk.Label(compare, text='← 保存', font=('', 13, 'bold'))
+        arrow.grid(row=0, column=1, padx=12)
+        right = ttk.LabelFrame(compare, text='新規切り出し画像', padding=6)
+        right.grid(row=0, column=2, sticky='nsew')
+        # Keep identical vertical structure on both sides.
+        ttk.Label(right, text=' ').pack(fill='x')
+        new_area = ttk.Frame(right, height=110)
+        new_area.pack(fill='both', expand=True)
+        new_area.pack_propagate(False)
+        self.new_preview = ttk.Label(new_area, text='画像未選択', anchor='center')
+        self.new_preview.place(relx=0.5, rely=0.5, anchor='center')
+        nav = ttk.Frame(frame)
+        nav.pack(side='top', fill='x', pady=6)
+        ttk.Button(nav, text='前へ', command=lambda: self.change(-1)).pack(side='left')
+        ttk.Button(nav, text='次へ', command=lambda: self.change(1)).pack(side='left', padx=6)
+        ttk.Button(nav, text='この画像を登録', command=self.save).pack(side='right')
+        self.status = ttk.Label(frame)
+        self.status.pack(side='top', anchor='w')
+        self.refresh()
+
+    def key(self):
+        return (self.index, self.side.get(), self.graph.get())
+
+    def current_box(self):
+        name, base, _ = TEMPLATE_STEPS[self.index]
+        if name == 'NO_ENTRY.png' and self.side.get() == '2P':
+            base = (12, 959, 92, 968)
+        if name == 'SCRATCH.png' and self.side.get() == '2P':
+            base = (1758, 729, 1899, 870)
+        elif name == 'GET_READY.png' and self.side.get() == '2P':
+            # Mirrored search region: starting estimate; verify by preview.
+            base = (1920 - base[2], base[1], 1920 - base[0], base[3])
+        elif name == 'OP_CURRENT_SCORE.png':
+            ax, ay = SCORE_ANCHORS[(self.side.get(), self.graph.get())]
+            base = (ax, ay, ax + 196, ay + 38)
+        elif name.startswith('Op.'):
+            ax, ay = SCORE_ANCHORS[(self.side.get(), self.graph.get())]
+            dx, dy = ax - 551, ay - 873
+            base = tuple(v + (dx if i % 2 == 0 else dy) for i, v in enumerate(base))
+        dx, dy = self.offsets.get(self.key(), (0, 0))
+        return (base[0]+dx, base[1]+dy, base[2]+dx, base[3]+dy)
+
+    def choose_image(self):
+        filename = filedialog.askopenfilename(parent=self.win, title='1920x1080 screenshot',
+            filetypes=[('Image files', '*.png *.jpg *.jpeg *.bmp'), ('All files', '*.*')])
+        if not filename:
+            return
+        try:
+            with self.Image.open(filename) as im:
+                if im.size != (1920, 1080):
+                    messagebox.showerror('画像サイズ不一致', f'1920×1080 が必要です。選択画像: {im.size}', parent=self.win)
+                    return
+                self.image = im.convert('RGBA').copy()
+            self.image_path = filename
+        except Exception as exc:
+            messagebox.showerror('読み込み失敗', str(exc), parent=self.win)
+            return
+        self.refresh()
+
+    def move(self, dx, dy):
+        x, y = self.offsets.get(self.key(), (0, 0))
+        self.offsets[self.key()] = (x + dx, y + dy)
+        self.refresh()
+
+    def reset(self):
+        self.offsets[self.key()] = (0, 0)
+        self.refresh()
+
+    def change(self, delta):
+        self.index = max(0, min(len(TEMPLATE_STEPS)-1, self.index + delta))
+        self.refresh()
+
+    @staticmethod
+    def valid_box(box):
+        x1, y1, x2, y2 = box
+        return 0 <= x1 < x2 <= 1920 and 0 <= y1 < y2 <= 1080
+
+    def show_thumb(self, label, image, key, width=420, height=100):
+        if image is None:
+            label.configure(image='', text='画像なし')
+            self.photos.pop(key, None)
+            return
+        scale = min(width / image.width, height / image.height, 8)
+        w = max(1, round(image.width * scale))
+        h = max(1, round(image.height * scale))
+        resized = image.resize((w, h), self.Image.Resampling.NEAREST)
+        self.photos[key] = self.ImageTk.PhotoImage(resized, master=self.win)
+        label.configure(image=self.photos[key], text='')
+
+    def refresh(self):
+        name, _, note = TEMPLATE_STEPS[self.index]
+        box = self.current_box()
+        target = self.out_dir / name
+        self.step_label.configure(text=f'{self.index + 1} / 12   {name}')
+        self.note_label.configure(text=note)
+        self.source_label.configure(text=Path(self.image_path).name if self.image_path else '画像未選択')
+        self.coord_label.configure(text=f'座標: {box}   サイズ: {box[2]-box[0]} × {box[3]-box[1]}')
+        exists = target.is_file()
+        self.registered_status.configure(text='● 登録済み' if exists else '● 未登録',
+            fg='#137a27' if exists else '#c92323')
+        registered = None
+        if exists:
+            try:
+                with self.Image.open(target) as im:
+                    registered = im.convert('RGBA').copy()
+            except OSError:
+                self.registered_status.configure(text='● 読み込み不可', fg='#c92323')
+        self.show_thumb(self.registered_preview, registered, 'registered')
+        self.status.configure(text=f'登録済み: {sum((self.out_dir / n).is_file() for n, _, _ in TEMPLATE_STEPS)} / 12   保存先: {self.out_dir}')
+        if self.image is None or not self.valid_box(box):
+            self.full_image.configure(image='', text='画像を読み込んでください' if self.image is None else '範囲外です')
+            self.photos.pop('full', None)
+            self.show_thumb(self.new_preview, None, 'new')
+            return
+        marked = self.image.convert('RGB').copy()
+        draw = self.ImageDraw.Draw(marked)
+        draw.rectangle((box[0], box[1], box[2]-1, box[3]-1), outline=(255, 40, 40), width=4)
+        marked.thumbnail((990, 365), self.Image.Resampling.LANCZOS)
+        self.photos['full'] = self.ImageTk.PhotoImage(marked, master=self.win)
+        self.full_image.configure(image=self.photos['full'], text='')
+        self.show_thumb(self.new_preview, self.image.crop(box), 'new')
+
+    def save(self):
+        if self.image is None:
+            messagebox.showwarning('画像未選択', 'スクリーンショットを選択してください。', parent=self.win)
+            return
+        box = self.current_box()
+        if not self.valid_box(box):
+            messagebox.showerror('座標エラー', '切り出し範囲が画像外です。', parent=self.win)
+            return
+        name = TEMPLATE_STEPS[self.index][0]
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        target = self.out_dir / name
+        if target.exists() and not messagebox.askyesno('上書き確認', f'{name} を上書きしますか？\n元の画像はバックアップされます。', parent=self.win):
+            return
+        try:
+            if target.exists():
+                import datetime
+                stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                backup_dir = BASE / 'template_wizard_backup'
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, backup_dir / f'{stamp}_{name}')
+            self.image.crop(box).save(target)
+        except OSError as exc:
+            messagebox.showerror('保存失敗', str(exc), parent=self.win)
+            return
+        self.refresh()
+        messagebox.showinfo('登録完了', f'{name} を登録しました。', parent=self.win)
 
 
 if __name__ == '__main__':
