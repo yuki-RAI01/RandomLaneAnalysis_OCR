@@ -1,0 +1,12 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><style>
+:root {--background:rgba(20,20,20,.92);--foreground:#fff;--accent:#9ad8ff}
+html,body{margin:0;background:transparent;color:var(--foreground);font:20px 'Yu Gothic UI',sans-serif}
+#history{display:none;max-width:760px;padding:14px;background:var(--background);border-radius:10px}
+.header{color:var(--accent);font-weight:bold;margin-bottom:8px}.entry{padding:8px 0;border-top:1px solid #666}
+.meta{font-size:17px;color:#ddd}
+</style></head><body><div id="history"><div class="header">RANDOM HISTORY</div><div id="entries"></div></div>
+<script>
+function render(){const s=window.IIDX_RANDOM_STATE||{};const box=document.getElementById('history');const rows=Array.isArray(s.history)?s.history:[];box.style.display=s.history_visible&&rows.length?'block':'none';const list=document.getElementById('entries');list.replaceChildren();rows.forEach((r,i)=>{let el=document.createElement('div');el.className='entry';let title=document.createElement('div');title.textContent=(rows.length-i)+'. '+(r.title||'UNKNOWN');let meta=document.createElement('div');meta.className='meta';meta.textContent=(r.difficulty||'?')+' LV.'+(r.level??'?')+'  |  '+(r.layout||'未確定');el.append(title,meta);list.append(el)})}
+function poll(){const old=document.getElementById('stateScript');if(old)old.remove();const s=document.createElement('script');s.id='stateScript';s.src='iidx_random_state.js?t='+Date.now();s.onload=render;document.head.append(s)}
+setInterval(poll,500);poll();
+</script></body></html>

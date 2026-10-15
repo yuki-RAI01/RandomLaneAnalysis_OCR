@@ -1,0 +1,46 @@
+# Build outputs
+/dist/
+/build/
+__pycache__/
+*.py[cod]
+
+# Local build tooling
+/build_single_exe.ps1
+/*.spec
+
+# Historical versions and test data
+/old/
+/history_csv/
+/note_debug/
+/data/db_backups/
+/iidx_main_note_debug.py
+
+# Local state / machine-specific settings
+/config/display_settings.json
+/config/iidx_history_overlay_config.json
+/config/iidx_overlay_config.json
+/config/roi_default.json
+/web/iidx_random_state.js
+/web/iidx_random_state.json
+
+# Initial chart database pending rights review
+/data/iidx_songs.sqlite3
+
+# Audit files
+/dist_folder_list.txt
+/source_folder_list.txt
+
+# Environments and caches
+.venv/
+venv/
+.pytest_cache/
+*.log
+.DS_Store
+Thumbs.db
+
+# Old documentation and local investigation files
+/README_old*.md
+/git_status_list.txt
+
+# Game-derived template images (not included in source repository)
+/templates/
