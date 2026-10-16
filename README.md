@@ -66,6 +66,18 @@ OBS側のSpout送信名は `Spout_OBS_Filter` に設定してください。イ�
 
 利用条件の詳細は [LICENSE.md](LICENSE.md) をご確認ください。
 
+## 第三者ライブラリについて
+
+本ツールには、pygame、SDL2、OpenCV、Pillow、PyInstaller、PyOpenGL、SpoutGLなどの第三者製ソフトウェアが含まれています。
+
+これらには各権利者が定めるライセンスが適用され、作者独自の利用条件によって、それらのライセンス上の権利が制限されることはありません。
+
+Windows配布版に同梱するライセンス文書およびソースコード等の資料は、`third_party_licenses/` フォルダをご確認ください。
+
+pygame 2.6.1はGNU LGPL 2.1に基づいて配布されています。pygameのソースアーカイブ `pygame-2.6.1.tar.gz` とライセンス文書 `pygame_LGPL.txt` を同梱しています。
+
+第三者ライブラリの改変・再配布等については、それぞれのライセンス条件に従ってください。
+
 ## 不具合報告・改善要望
 
 不具合報告や改善要望は、[GitHub Issues](https://github.com/yuki-RAI01/RandomLaneAnalysis_OCR/issues) からお願いします。
