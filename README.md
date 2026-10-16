@@ -66,6 +66,12 @@ OBS側のSpout送信名は `Spout_OBS_Filter` に設定してください。イ�
 
 利用条件の詳細は [LICENSE.md](LICENSE.md) をご確認ください。
 
+## 不具合報告・改善要望
+
+不具合報告や改善要望は、[GitHub Issues](https://github.com/yuki-RAI01/RandomLaneAnalysis_OCR/issues) からお願いします。
+
+本ツールは個人開発のため、すべての報告への返信・対応を保証するものではありません。
+
 ## 権利関係・免責事項
 
 本ツールは公式製品ではなく、作者が個人で開発した非公式ツールです。

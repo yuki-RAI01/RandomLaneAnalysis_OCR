@@ -6,6 +6,9 @@ __pycache__/
 
 # Local build tooling
 /build_single_exe.ps1
+/build_release.ps1
+/release_build/
+/release_build_work/
 /*.spec
 
 # Historical versions and test data
@@ -47,3 +50,4 @@ Thumbs.db
 
 # Template wizard backups
 /template_wizard_backup/
+
