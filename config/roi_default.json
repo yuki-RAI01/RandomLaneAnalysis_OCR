@@ -1,0 +1,41 @@
+{
+  "fps": 59.99874692605297,
+  "frame_size": [
+    1920,
+    1080
+  ],
+  "roi": [
+    165,
+    84,
+    343,
+    81
+  ],
+  "band_y_in_roi": [
+    55,
+    75
+  ],
+  "lane_numbering": "left_to_right_1_to_7",
+  "scratch_detection": false,
+  "lane_boundaries_ratio": [
+    0.0,
+    0.153,
+    0.282,
+    0.436,
+    0.564,
+    0.718,
+    0.847,
+    1.0
+  ],
+  "editor_2p": {
+    "band_y_in_roi": [
+      55,
+      75
+    ],
+    "roi": [
+      1412,
+      84,
+      343,
+      81
+    ]
+  }
+}

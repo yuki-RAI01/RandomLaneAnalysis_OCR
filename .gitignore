@@ -7,6 +7,8 @@ __pycache__/
 # Local build tooling
 /build_single_exe.ps1
 /build_release.ps1
+/build_release_revised.ps1
+/build_release_config_all.ps1
 /release_build/
 /release_build_work/
 /*.spec
@@ -19,12 +21,15 @@ __pycache__/
 /iidx_main_note_debug.py
 
 # Local state / machine-specific settings
-/config/display_settings.json
-/config/iidx_history_overlay_config.json
-/config/iidx_overlay_config.json
-/config/roi_default.json
+#/config/display_settings.json
+#/config/iidx_history_overlay_config.json
+#/config/iidx_overlay_config.json
+#/config/roi_default.json
 /web/iidx_random_state.js
 /web/iidx_random_state.json
+
+# Local OCR shape editor settings
+#/config/iidx_shape_editor.json
 
 # Initial chart database pending rights review
 /data/iidx_songs.sqlite3
@@ -50,10 +55,6 @@ Thumbs.db
 
 # Template wizard backups
 /template_wizard_backup/
-
-
-# Local OCR shape editor settings
-/config/iidx_shape_editor.json
 
 # Local database backups
 /data/iidx_songs_old*.sqlite3

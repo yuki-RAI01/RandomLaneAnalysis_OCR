@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "history_visibility": {
+    "playing": false,
+    "ended": true,
+    "selecting": true
+  }
+}

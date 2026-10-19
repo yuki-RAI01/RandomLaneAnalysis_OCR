@@ -1,0 +1,80 @@
+{
+  "positions": {
+    "playing": {
+      "x": 1393,
+      "y": 191,
+      "width": 510,
+      "height": 360
+    },
+    "ended": {
+      "x": 839,
+      "y": 64,
+      "width": 510,
+      "height": 360
+    },
+    "selecting": {
+      "x": 1211,
+      "y": 748,
+      "width": 510,
+      "height": 203
+    }
+  },
+  "side_profiles": {
+    "1P": {
+      "positions": {
+        "playing": {
+          "x": 1393,
+          "y": 191,
+          "width": 510,
+          "height": 360
+        },
+        "ended": {
+          "x": 839,
+          "y": 64,
+          "width": 510,
+          "height": 360
+        },
+        "selecting": {
+          "x": 1211,
+          "y": 748,
+          "width": 510,
+          "height": 203
+        }
+      },
+      "visibility": {
+        "playing": true,
+        "ended": true,
+        "selecting": true
+      },
+      "monitor": ""
+    },
+    "2P": {
+      "positions": {
+        "playing": {
+          "x": 12,
+          "y": 184,
+          "width": 510,
+          "height": 360
+        },
+        "ended": {
+          "x": 569,
+          "y": 64,
+          "width": 510,
+          "height": 360
+        },
+        "selecting": {
+          "x": 1211,
+          "y": 748,
+          "width": 510,
+          "height": 203
+        }
+      },
+      "visibility": {
+        "playing": true,
+        "ended": true,
+        "selecting": true
+      },
+      "monitor": ""
+    }
+  }
+}
