@@ -58,6 +58,7 @@ class Editor:
         actions = ttk.Frame(root, padding=(12, 3, 12, 12))
         actions.pack(fill='x')
         ttk.Button(actions, text='変更を保存', command=self.save).pack(side='right', padx=4)
+        ttk.Button(actions, text='選択曲を削除', command=self.delete_selected).pack(side='right', padx=12)
         ttk.Button(actions, text='選択曲を再読込', command=self.reload_selection).pack(side='right', padx=4)
         ttk.Button(actions, text='一覧を更新', command=self.load_rows).pack(side='left', padx=4)
         ttk.Button(actions, text='エクスポート', command=self.export_dialog).pack(side='left', padx=12)
@@ -193,6 +194,62 @@ class Editor:
         except (sqlite3.Error, OSError) as exc:
             self.conn.rollback()
             messagebox.showerror('保存エラー', f'保存できませんでした。\n{exc}')
+
+    def delete_selected(self):
+        """Delete a song and all its NORMAL charts, with a recoverable DB backup."""
+        if self.selected_id is None or self.original is None:
+            messagebox.showinfo('未選択', '削除する曲を一覧から選択してください。')
+            return
+        if self.db_missing:
+            messagebox.showwarning('DB未作成', 'データベースがありません。')
+            return
+        if self.has_unsaved_changes():
+            messagebox.showwarning('未保存の変更', '編集内容を保存または再読込してから削除してください。')
+            return
+        song_id = self.selected_id
+        try:
+            row = self.conn.execute('SELECT official_title, ocr_title FROM songs WHERE song_id=?', (song_id,)).fetchone()
+            if row is None:
+                messagebox.showwarning('削除対象なし', '曲が見つかりません。一覧を更新してください。')
+                self.selected_id = None
+                self.original = None
+                self.load_rows()
+                return
+            count = self.conn.execute('SELECT COUNT(*) FROM normal_charts WHERE song_id=?', (song_id,)).fetchone()[0]
+            if not messagebox.askyesno('曲と譜面の削除確認',
+                    f'以下の曲と登録済みNORMAL譜面 {count}件を削除します。\n\n'
+                    f'ID: {song_id}\n正式曲名: {row[0]}\n\n'
+                    '削除前にDB全体のバックアップを作成します。\n'
+                    '削除後、この曲は次回プレー時に再登録・再取得できます。\n\n実行しますか？',
+                    icon='warning'):
+                return
+            BACKUP.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            backup = BACKUP / f'iidx_songs_before_delete_{stamp}.sqlite3'
+            with sqlite3.connect(str(backup)) as dst:
+                self.conn.backup(dst)
+            try:
+                self.conn.execute('BEGIN IMMEDIATE')
+                current = self.conn.execute('SELECT official_title, ocr_title FROM songs WHERE song_id=?', (song_id,)).fetchone()
+                if current != row:
+                    raise ValueError('曲名が変更されています。再読込してから削除してください。')
+                self.conn.execute('DELETE FROM normal_charts WHERE song_id=?', (song_id,))
+                cur = self.conn.execute('DELETE FROM songs WHERE song_id=? AND official_title=? AND ocr_title=?',
+                                        (song_id, row[0], row[1]))
+                if cur.rowcount != 1:
+                    raise ValueError('削除対象が変更されました。')
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            self.selected_id = None
+            self.original = None
+            self.official.set('')
+            self.ocr.set('')
+            self.load_rows()
+            messagebox.showinfo('削除完了', f'曲ID {song_id} とNORMAL譜面 {count}件を削除しました。\n\nバックアップ:\n{backup}')
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            messagebox.showerror('削除失敗', str(exc))
 
     def has_unsaved_changes(self):
         return self.original is not None and (self.official.get(), self.ocr.get()) != self.original[1:]

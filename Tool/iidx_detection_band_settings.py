@@ -19,7 +19,7 @@ BASE = app_root()
 CONFIG = BASE / 'config' / 'roi_default.json'
 DEFAULT_1P = [165, 84, 343, 81]
 FRAME_W, FRAME_H = 1920, 1080
-BAND_HEIGHT = 20  # Matches current main program (band_top + 20).
+DEFAULT_BAND_HEIGHT = 20  # Keep the proven default when no custom height is saved.
 
 
 def clamp(v, lo, hi):
@@ -48,8 +48,11 @@ class Editor:
         self.roi2 = list(map(int, self.data.get('editor_2p', {}).get('roi', [FRAME_W - self.roi1[0] - self.roi1[2], self.roi1[1], self.roi1[2], self.roi1[3]])))
         self.tops = {'1P': int(self.data.get('band_y_in_roi', [55])[0]),
                      '2P': int(self.data.get('editor_2p', {}).get('band_y_in_roi', [55])[0])}
+        self.heights = {'1P': self._loaded_height(self.data.get('band_y_in_roi', [55, 75])),
+                        '2P': self._loaded_height(self.data.get('editor_2p', {}).get('band_y_in_roi', [55, 75]))}
         self.side = tk.StringVar(value='1P')
         self.y_var = tk.IntVar(value=self.tops['1P'])
+        self.height_var = tk.IntVar(value=self.heights['1P'])
         self.image = None
         self.image_path = None
         self.tkimage = None
@@ -57,6 +60,7 @@ class Editor:
         self.offset = (0, 0)
         self.dragging = False
         self.changed = False
+        self._syncing_inputs = False
         self.status = tk.StringVar(value=f'保存先: {CONFIG}')
 
         bar = ttk.Frame(root, padding=8)
@@ -75,14 +79,24 @@ class Editor:
         self.spin = ttk.Spinbox(settings, from_=0, to=1000, width=6, textvariable=self.y_var)
         self.spin.pack(side='left', padx=6)
         self.spin.bind('<Return>', self.from_input)
-        ttk.Button(settings, text='入力値を反映', command=self.from_input).pack(side='left', padx=6)
+        self.spin.bind('<FocusOut>', self.from_input)
         ttk.Button(settings, text='↑ 1px', command=lambda: self.shift(-1)).pack(side='left', padx=3)
         ttk.Button(settings, text='↓ 1px', command=lambda: self.shift(1)).pack(side='left', padx=3)
+        ttk.Label(settings, text='検出帯の高さ(px)').pack(side='left', padx=(14, 2))
+        self.height_spin = ttk.Spinbox(settings, from_=1, to=300, width=5, textvariable=self.height_var)
+        self.height_spin.pack(side='left', padx=4)
+        self.height_spin.bind('<Return>', self.from_input)
+        self.height_spin.bind('<FocusOut>', self.from_input)
+        # Spinbox arrows and direct keyboard input update the preview immediately.
+        self.y_var.trace_add('write', self._on_numeric_change)
+        self.height_var.trace_add('write', self._on_numeric_change)
         self.info = ttk.Label(settings, text='')
         self.info.pack(side='left', padx=16)
 
         self.notice = ttk.Label(root, padding=(10, 5), wraplength=1250, justify='left',
-            text='画像上の色付き帯を上下ドラッグできます（横移動・帯の高さ変更は不可）。背景画像はプレビュー専用です。')
+            text='画像上の色付き帯を上下ドラッグできます（横移動は不可。高さ位置は数値で変更できます）。\n'
+                 '検出帯幅の初期設定は20pxです。1～300pxで変更可能ですが、広げすぎると同レーン上で近接する複数ノーツが1つのノーツとして検出される可能性があります。\n'
+                 '設定変更後は分析を再度スタートさせてください。')
         self.notice.pack(fill='x')
         self.canvas = tk.Canvas(root, bg='#202328', highlightthickness=0)
         self.canvas.pack(fill='both', expand=True, padx=8, pady=8)
@@ -95,38 +109,75 @@ class Editor:
         root.geometry('1320x850')
         self.refresh()
 
+    @staticmethod
+    def _loaded_height(band):
+        if isinstance(band, (list, tuple)) and len(band) == 2:
+            try:
+                return max(1, int(band[1]) - int(band[0]))
+            except (TypeError, ValueError):
+                pass
+        return DEFAULT_BAND_HEIGHT
+
+    def height(self):
+        return self.heights[self.side.get()]
+
     def roi(self):
         return self.roi1 if self.side.get() == '1P' else self.roi2
 
     def limit(self, value):
         roi = self.roi()
         # Keep the entire detection band inside image and ensure ROI covers it.
-        return clamp(int(value), 0, FRAME_H - roi[1] - BAND_HEIGHT)
+        return clamp(int(value), 0, FRAME_H - roi[1] - self.height())
 
     def refresh(self):
         side = self.side.get()
         self.tops[side] = self.limit(self.tops[side])
-        self.y_var.set(self.tops[side])
+        self._syncing_inputs = True
+        try:
+            self.y_var.set(self.tops[side])
+            self.height_var.set(self.heights[side])
+        finally:
+            self._syncing_inputs = False
         x, y, w, h = self.roi()
         top = self.tops[side]
-        self.info.config(text=f'{side}  X={x}（固定）  絶対Y={y + top}～{y + top + BAND_HEIGHT}  高さ={BAND_HEIGHT}px')
-        if side == '2P':
-            self.notice.config(text='2Pの横位置は1P領域を左右反転した仮の固定値です。2P設定はiidx_main.pyで読み込まれます。横位置は保存済みのROI値です。')
-        else:
-            self.notice.config(text='画像上の色付き帯を上下ドラッグできます（横移動・帯の高さ変更は不可）。1P設定は現行メインプログラムが次回起動時に読み込みます。')
+        self.info.config(text=f'{side}  X={x}（固定）  絶対Y={y + top}～{y + top + self.height()}  高さ={self.height()}px')
         self.redraw()
 
     def switch_side(self):
         self.refresh()
 
-    def from_input(self, _event=None):
-        try:
-            value = self.limit(self.y_var.get())
-        except (ValueError, tk.TclError):
-            self.refresh()
+    def _on_numeric_change(self, *_args):
+        """Apply valid typed/spinbox values without requiring Enter.
+
+        Intermediate typing states (empty, minus sign, out of range) are
+        ignored until valid. They are normalized on focus loss / Enter.
+        """
+        if self._syncing_inputs:
             return
-        self.tops[self.side.get()] = value
+        side = self.side.get()
+        try:
+            height = int(self.height_var.get())
+            top = int(self.y_var.get())
+        except (ValueError, tk.TclError):
+            return
+        if not (1 <= height <= 300 and 0 <= top <= 1000):
+            return
+        max_top = FRAME_H - self.roi()[1] - height
+        if max_top < 0:
+            return
+        top = min(top, max_top)
+        if (self.heights[side], self.tops[side]) == (height, top):
+            return
+        self.heights[side] = height
+        self.tops[side] = top
         self.changed = True
+        x, y, _w, _h = self.roi()
+        self.info.config(text=f'{side}  X={x}（固定）  絶対Y={y + top}～{y + top + height}  高さ={height}px')
+        self.redraw()
+
+    def from_input(self, _event=None):
+        """Finalize pending edits, clamping any out-of-range entry."""
+        self._on_numeric_change()
         self.refresh()
 
     def shift(self, delta):
@@ -138,6 +189,7 @@ class Editor:
     def reset(self):
         side = self.side.get()
         original = self.data.get('band_y_in_roi', [55]) if side == '1P' else self.data.get('editor_2p', {}).get('band_y_in_roi', [55])
+        self.heights[side] = self._loaded_height(original)
         self.tops[side] = self.limit(int(original[0]))
         self.refresh()
 
@@ -182,9 +234,9 @@ class Editor:
         x, y, w, _h = self.roi()
         top = self.tops[self.side.get()]
         # Canvas stipple is used so the underlying screenshot remains visible.
-        canvas.create_rectangle(ox + x*scale, oy + y*scale, ox + (x+w)*scale, oy + (y + max(self.roi()[3], top+BAND_HEIGHT))*scale,
+        canvas.create_rectangle(ox + x*scale, oy + y*scale, ox + (x+w)*scale, oy + (y + max(self.roi()[3], top+self.height()))*scale,
                                 outline='#4cb9ff', width=2)
-        canvas.create_rectangle(ox + x*scale, oy + (y+top)*scale, ox + (x+w)*scale, oy + (y+top+BAND_HEIGHT)*scale,
+        canvas.create_rectangle(ox + x*scale, oy + (y+top)*scale, ox + (x+w)*scale, oy + (y+top+self.height())*scale,
                                 fill='#f8dc45', stipple='gray25', outline='#ffb300', width=2, tags='band')
         canvas.create_text(ox + x*scale, oy + (y+top)*scale - 9, anchor='sw', text=f'{self.side.get()} BAND Y={y+top}', fill='#ffdc43', font=('Arial', 11, 'bold'))
 
@@ -194,7 +246,7 @@ class Editor:
         px = (event.x - ox) / self.scale
         py = (event.y - oy) / self.scale
         top = self.tops[self.side.get()]
-        self.dragging = x <= px <= x+w and y+top-12 <= py <= y+top+BAND_HEIGHT+12
+        self.dragging = x <= px <= x+w and y+top-12 <= py <= y+top+self.height()+12
         if self.dragging:
             self.drag_offset = py - (y+top)
 
@@ -216,9 +268,13 @@ class Editor:
             if list(map(int, current['roi'])) != self.roi1:
                 if not messagebox.askyesno('ROIの変更', '外部で1PのROIが変更されています。現在のROIを維持し、Y設定のみ保存しますか？'):
                     return
+            for side in ('1P', '2P'):
+                roi = self.roi1 if side == '1P' else self.roi2
+                if not (1 <= self.heights[side] <= 300 and 0 <= self.tops[side] and roi[1] + self.tops[side] + self.heights[side] <= FRAME_H):
+                    raise ValueError(f'{side}の検出帯が画面外です。')
             top = int(self.tops['1P'])
-            current['band_y_in_roi'] = [top, top + BAND_HEIGHT]
-            current['editor_2p'] = {**current.get('editor_2p', {}), 'roi': self.roi2, 'band_y_in_roi': [int(self.tops['2P']), int(self.tops['2P']) + BAND_HEIGHT]}
+            current['band_y_in_roi'] = [top, top + self.heights['1P']]
+            current['editor_2p'] = {**current.get('editor_2p', {}), 'roi': self.roi2, 'band_y_in_roi': [int(self.tops['2P']), int(self.tops['2P']) + self.heights['2P']]}
             CONFIG.parent.mkdir(parents=True, exist_ok=True)
             temp = CONFIG.with_suffix('.json.tmp')
             temp.write_text(json.dumps(current, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

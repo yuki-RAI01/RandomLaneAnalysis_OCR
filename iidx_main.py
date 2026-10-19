@@ -974,43 +974,56 @@ def open_song_db(path):
         FOREIGN KEY(song_id) REFERENCES songs(song_id)
     );
     """)
+    # Backward-compatible migration: legacy columns remain for other tools.
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(songs)")}
+    for column, definition in (("ocr_title_jp", "TEXT"), ("ocr_title_en", "TEXT"),
+                               ("title_confirmed", "INTEGER NOT NULL DEFAULT 1")):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE songs ADD COLUMN {column} {definition}")
+    # Existing OCR strings were produced by the Japanese Windows OCR.
+    conn.execute("UPDATE songs SET ocr_title_jp=ocr_title WHERE ocr_title_jp IS NULL")
     conn.commit()
     return conn
 
 def normalize_ocr(text):
     text = unicodedata.normalize("NFKC", text).casefold()
-    return "".join(ch for ch in text if not ch.isspace())
+    return " ".join(text.split())
 
 def match_song(conn, ocr_text):
+    """Match either OCR language, official title, or legacy OCR alias."""
     needle = normalize_ocr(ocr_text)
     if not needle:
         return None, "EMPTY", []
-    rows = conn.execute("SELECT song_id, official_title, ocr_title FROM songs").fetchall()
-    scored = sorted(((difflib.SequenceMatcher(None, needle, normalize_ocr(r[2])).ratio(), r)
-                     for r in rows), key=lambda x: x[0], reverse=True)
-    suggestions = [(round(score, 3), r[0], r[1]) for score, r in scored[:3]]
+    rows = conn.execute("SELECT song_id,official_title,ocr_title,ocr_title_jp,ocr_title_en FROM songs").fetchall()
+    scored = []
+    for song_id, official, legacy, jp, en in rows:
+        aliases = [v for v in (official, legacy, jp, en) if v]
+        score = max((difflib.SequenceMatcher(None, needle, normalize_ocr(v)).ratio()
+                     for v in aliases), default=0.)
+        scored.append((score, (song_id, official, legacy)))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    suggestions = [(round(score, 3), row[0], row[1]) for score, row in scored[:3]]
     if not scored:
         return None, "NO_DB_ENTRIES", suggestions
     best_score, best = scored[0]
-    second = scored[1][0] if len(scored) > 1 else 0.0
-    if best_score == 1.0 and second < 1.0:
+    second = scored[1][0] if len(scored)>1 else 0.
+    if best_score == 1. and second < 1.:
         return best, "EXACT", suggestions
-    # Conservative: ambiguous results are UNKNOWN, never silently create an ID.
-    if best_score >= 0.94 and best_score - second >= 0.10:
+    if best_score >= .94 and best_score-second >= .10:
         return best, "FUZZY", suggestions
     return None, "UNKNOWN", suggestions
 
-def tesseract_ocr(crop_bgr, lang):
+def tesseract_ocr(crop_bgr, lang, scale=3):
+    """Tesseract fallback. Test original and enlarged crops independently."""
     exe = str(TESSERACT_EXE) if TESSERACT_EXE.is_file() else shutil.which("tesseract")
     if not exe:
         raise FileNotFoundError("Tesseract not found: install or add tesseract.exe to PATH")
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-    up = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    ok, encoded = cv2.imencode(".png", up)
+    if scale != 1:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    ok, encoded = cv2.imencode(".png", gray)
     if not ok:
         raise RuntimeError("OCR image encode failed")
-    # Prevent the Tesseract child process from creating/activating a console
-    # window while INFINITAS has focus. Keep the OCR pipeline unchanged.
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
     proc = subprocess.run([exe, "stdin", "stdout", "-l", lang, "--psm", "7", "--oem", "1"],
                           input=encoded.tobytes(), capture_output=True, timeout=10,
@@ -1019,66 +1032,247 @@ def tesseract_ocr(crop_bgr, lang):
         raise RuntimeError(proc.stderr.decode("utf-8", "replace").strip())
     return proc.stdout.decode("utf-8", "replace").strip().replace("\n", " ")
 
-def auto_register_song(conn, title):
-    """Register a previously unknown OCR title, without replacing any existing song."""
-    title = " ".join(title.strip().split())
-    if not title or len(title) < 3 or len(title) > 200 or not any(ch.isalnum() for ch in title):
+
+def _title_character_counts(value):
+    jp = sum('\u3040' <= c <= '\u30ff' or '\u3400' <= c <= '\u9fff' for c in value)
+    latin = sum(('a' <= c.lower() <= 'z') for c in value)
+    return jp, latin
+
+
+def _title_candidate_score(lang, variant, value):
+    """Rank OCR candidates; prefer meaningful Japanese runs over Latin OCR noise."""
+    jp, latin = _title_character_counts(value)
+    if not value:
+        return -1000.
+    score = 0.
+    if lang == 'ja-JP':
+        if jp and not latin:
+            score += 4.0
+        elif jp and latin:
+            # A real Japanese/Latin mixed title normally contains kana or
+            # multiple adjacent Japanese glyphs. One stray CJK glyph in an
+            # English title (e.g. 凵GHTNING) should not win.
+            import re
+            kana = sum('\u3040' <= c <= '\u30ff' for c in value)
+            jp_runs = re.findall(r'[\u3040-\u30ff\u3400-\u9fff]+', value)
+            strong_japanese = kana >= 2 or any(len(run) >= 2 for run in jp_runs)
+            score += 5.0 if strong_japanese else (-2.5 if jp < latin else 1.0)
+        elif latin:
+            score += 1.0
+    else:
+        if latin and not jp:
+            score += 3.0
+        elif jp:
+            score -= 3.0
+    score += {'original': .25, 'up2': .12, 'up3': 0.}.get(variant, 0.)
+    if len(value) > 1 and not any(c.isalpha() for c in value):
+        score -= 1.
+    return score
+
+
+def _provisional_title(value):
+    """Remove only OCR-inserted spaces BETWEEN Japanese glyphs for display.
+
+    Raw Japanese/English OCR aliases are stored unchanged. Spaces between
+    Latin words and at Japanese/Latin boundaries are kept.
+    """
+    import re
+    value = ' '.join((value or '').strip().split())
+    japanese = r'\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff'
+    return re.sub(r'(?<=[' + japanese + r']) +(?=[' + japanese + r'])', '', value)
+
+
+def _best_title_candidate(candidates, language):
+    options = [c for c in candidates if c[0] == language]
+    if not options: return None
+    return max(options, key=lambda c: (_title_candidate_score(*c),
+                                      len(normalize_ocr(c[2]))))
+
+def allowed_single_letter_symbols():
+    """CSVのletter列を登録許可文字として利用。旧来の〆々は維持する。"""
+    symbols = set("〆々")
+    try:
+        from iidx_shape_features import read_csv
+        from iidx_paths import app_root
+        path = app_root() / "data" / "iidx_single_letter_shapes.csv"
+        symbols.update(row["letter"] for row in read_csv(path))
+    except Exception as exc:
+        print(f"[TITLE ALLOWED SYMBOLS WARNING] {type(exc).__name__}: {exc}", flush=True)
+    return symbols
+
+
+def auto_register_song(conn, title, jp=None, en=None):
+    """Create provisional song; retain legacy title columns for existing tools."""
+    title = _provisional_title(title)
+    if not title or len(title)>200 or not any(ch.isalnum() or ch in allowed_single_letter_symbols() for ch in title):
         print(f"[SONG AUTO REGISTER SKIPPED] invalid OCR title={title!r}", flush=True)
         return None
-    needle = normalize_ocr(title)
-    # Guard against duplicates with different capitalization or spacing.
-    rows = conn.execute("SELECT song_id,official_title,ocr_title FROM songs").fetchall()
-    for song_id, official, ocr in rows:
-        if needle in (normalize_ocr(official), normalize_ocr(ocr)):
-            print(f"[SONG IDENTIFIED] song_id={song_id} title={official!r} method=NORMALIZED_EXACT", flush=True)
-            return song_id
-    # A close but nonmatching existing entry could be an OCR typo. Do not
-    # silently create a duplicate in that case; it can be reviewed manually.
-    nearest = max((difflib.SequenceMatcher(None, needle, normalize_ocr(r[2])).ratio()
-                   for r in rows), default=0.0)
-    if nearest >= 0.80:
-        print(f"[SONG AUTO REGISTER SKIPPED] possible existing title, similarity={nearest:.3f} OCR={title!r}", flush=True)
+    # Never create a second row if any language already identifies a song.
+    for value in (title, jp, en):
+        if not value: continue
+        row, status, _ = match_song(conn, value)
+        if row is not None and status == 'EXACT':
+            print(f"[SONG IDENTIFIED] song_id={row[0]} method=REGISTER/EXACT", flush=True)
+            return row[0]
+    rows = conn.execute('SELECT official_title,ocr_title,ocr_title_jp,ocr_title_en FROM songs').fetchall()
+    nearest = max((difflib.SequenceMatcher(None, normalize_ocr(v), normalize_ocr(alias)).ratio()
+                   for v in (title,jp,en) if v for row in rows for alias in row if alias), default=0.)
+    if nearest >= .80:
+        print(f"[SONG AUTO REGISTER SKIPPED] possible existing title similarity={nearest:.3f} OCR={title!r}", flush=True)
         return None
     try:
-        cur = conn.execute("INSERT INTO songs(official_title,ocr_title) VALUES(?,?)", (title, title))
+        cur = conn.execute('INSERT INTO songs(official_title,ocr_title,ocr_title_jp,ocr_title_en,title_confirmed) VALUES(?,?,?,?,0)',
+                           (title,title,jp,en))
         conn.commit()
-        print(f"[SONG AUTO REGISTERED] song_id={cur.lastrowid} official_title={title!r} ocr_title={title!r}", flush=True)
+        print(f"[SONG AUTO REGISTERED] song_id={cur.lastrowid} provisional_title={title!r} jp={jp!r} en={en!r}",flush=True)
         return cur.lastrowid
     except sqlite3.IntegrityError as exc:
         conn.rollback()
-        print(f"[SONG AUTO REGISTER SKIPPED] {exc}", flush=True)
+        print(f"[SONG AUTO REGISTER SKIPPED] {exc}",flush=True)
         return None
 
 
-def identify_title(crop, conn):
-    started = time.perf_counter()
-    outputs = []
-    for lang in ("jpn", "eng+jpn"):
-        try:
-            raw = tesseract_ocr(crop, lang)
-            row, status, candidates = match_song(conn, raw)
-            outputs.append((lang, raw, status, candidates))
-            print(f"[TITLE OCR] lang={lang} text={raw!r} match={status} candidates={candidates}", flush=True)
+def _fill_ocr_aliases(conn, song_id, jp, en):
+    """Fill only empty slots; do not overwrite a previously confirmed alias."""
+    if not jp and not en: return
+    row=conn.execute('SELECT ocr_title_jp,ocr_title_en FROM songs WHERE song_id=?',(song_id,)).fetchone()
+    if not row: return
+    changes={}
+    if jp and not row[0]: changes['ocr_title_jp']=jp
+    if en and not row[1]: changes['ocr_title_en']=en
+    if changes:
+        conn.execute('UPDATE songs SET '+','.join(k+'=?' for k in changes)+' WHERE song_id=?',(*changes.values(),song_id))
+        conn.commit()
+
+def try_center_single_title(frame_bgr, layout, conn):
+    """One-kanji fallback: match an existing song or register an unseen kanji."""
+    if layout != "1P_GRAPH_LEFT":
+        print(f"[CENTER OCR SKIPPED] layout={layout} not calibrated", flush=True)
+        return None
+    try:
+        from iidx_center_winocr import recognize_center_single
+        candidate, priority, elapsed = recognize_center_single(frame_bgr, (1390, 360, 1500, 470))
+        print(f"[CENTER OCR] candidate={candidate!r} priority={priority} ms={elapsed:.1f}", flush=True)
+        if candidate:
+            row, status, _ = match_song(conn, candidate)
             if row is not None:
-                print(f"[SONG IDENTIFIED] song_id={row[0]} title={row[1]!r} "
-                      f"method={lang}/{status} elapsed={time.perf_counter()-started:.3f}s", flush=True)
+                print(f"[SONG IDENTIFIED] song_id={row[0]} title={row[1]!r} method=CENTER/{status}", flush=True)
                 return row[0]
-        except Exception as exc:
-            print(f"[TITLE OCR ERROR] lang={lang} {exc}", flush=True)
-    # Prefer the final eng+jpn OCR result; never register the preliminary jpn result.
-    final_ocr = next((raw for lang, raw, status, _ in reversed(outputs)
-                      if lang == "eng+jpn" and raw.strip()), None)
-    if final_ocr is None:
-        print(f"[SONG UNKNOWN] elapsed={time.perf_counter()-started:.3f}s; no usable final OCR", flush=True)
-        return None
-    return auto_register_song(conn, final_ocr)
+            # Only a single Japanese ideograph can be newly registered from
+            # the center. Latin letters and arbitrary text are not accepted.
+            if len(candidate) == 1 and ('\u3400' <= candidate <= '\u9fff' or
+                                        '\uf900' <= candidate <= '\ufaff'):
+                print(f"[CENTER OCR AUTO REGISTER] candidate={candidate!r} priority={priority}", flush=True)
+                return auto_register_song(conn, candidate, jp=candidate)
+            print(f"[CENTER OCR UNVERIFIED] candidate={candidate!r}; UNKNOWN", flush=True)
+    except Exception as exc:
+        print(f"[CENTER OCR ERROR] {type(exc).__name__}: {exc}", flush=True)
+    return None
 
-def title_ocr_worker(crop, db_path, generation, results):
+
+def identify_title(crop, conn, frame_bgr=None, layout=None):
+    """Bilingual OCR with optional Tesseract-eng fallback; no agreement required."""
+    from iidx_header_shape import measure
+    from iidx_center_winocr import recognize_header_title
+    info = measure(crop)
+    width = info['width'] if info else None
+    height = info['height'] if info else None
+    # Header glyphs as short as 10px were observed (雫: 23x10).
+    # Use a compact bounding box AND aspect ratio, not height alone.
+    single = bool(info and 8 <= height <= 32 and 7 <= width <= 35
+                  and 0.45 <= width / height <= 2.5)
+    outputs = {}
+    en_unavailable = False
+    for lang in ('ja-JP', 'en-US'):
+        try:
+            outputs[lang] = recognize_header_title(crop, lang=lang)
+        except Exception as exc:
+            print(f'[TITLE WINOCR ERROR] lang={lang} {type(exc).__name__}: {exc}', flush=True)
+            outputs[lang] = []
+            if lang == 'en-US': en_unavailable = True
+    if en_unavailable and not single:
+        fallback = []
+        for variant, scale in (('original', 1), ('up2', 2), ('up3', 3)):
+            try:
+                start = time.perf_counter()
+                value = tesseract_ocr(crop, 'eng', scale=scale)
+                ms = (time.perf_counter() - start) * 1000
+                fallback.append((variant, value, ms))
+                print(f'[TITLE TESSERACT] lang=eng variant={variant} text={value!r} ms={ms:.1f}', flush=True)
+            except Exception as exc:
+                print(f'[TITLE TESSERACT ERROR] variant={variant} {type(exc).__name__}: {exc}', flush=True)
+                break
+        outputs['tesseract-eng'] = fallback
+    candidates = []
+    for lang, results in outputs.items():
+        for variant, raw, ms in results:
+            value = ' '.join(raw.strip().split())
+            valid = bool(value and any(ch.isalnum() or ch in allowed_single_letter_symbols() for ch in value))
+            if single and (len(value) != 1 or value.upper() in {'A', 'D', 'F', 'X', 'V', '∀'}):
+                valid = False
+            if lang != 'tesseract-eng':
+                print(f'[TITLE WINOCR] lang={lang} variant={variant} text={raw!r} '
+                      f'ink={width}x{height} valid={valid} ms={ms:.1f}', flush=True)
+            if valid: candidates.append((lang, variant, value))
+    jp_candidate = _best_title_candidate(candidates, 'ja-JP')
+    en_candidate = (_best_title_candidate(candidates, 'en-US') or
+                    _best_title_candidate(candidates, 'tesseract-eng'))
+    jp = jp_candidate[2] if jp_candidate else None
+    en = en_candidate[2] if en_candidate else None
+    # Existing database recognition: any variant in either language can win.
+    # Conflicting exact hits are never silently resolved by OCR heuristics.
+    hits = []
+    for lang, variant, value in candidates:
+        row, status, _ = match_song(conn, value)
+        if row: hits.append((status, lang, variant, row))
+    for status_wanted in ('EXACT', 'FUZZY'):
+        group = [h for h in hits if h[0] == status_wanted]
+        if not group: continue
+        ids = {h[3][0] for h in group}
+        if len(ids) != 1:
+            print(f'[TITLE OCR CONFLICT] status={status_wanted} song_ids={sorted(ids)}; UNKNOWN', flush=True)
+            return None
+        status, lang, variant, row = group[0]
+        _fill_ocr_aliases(conn, row[0], jp, en)
+        print(f'[SONG IDENTIFIED] song_id={row[0]} method=HEADER/{lang}/{variant}/{status}', flush=True)
+        return row[0]
+    if single:
+        try:
+            from iidx_shape_features import extract, read_csv, compare
+            from iidx_paths import app_root
+            features, diag = extract(crop, (0, 0, crop.shape[1], crop.shape[0]))
+            samples = read_csv(app_root() / 'data' / 'iidx_single_letter_shapes.csv')
+            letter, details = compare(features, samples)
+            print(f"[TITLE SHAPE CSV] letter={letter!r} details={details} "
+                  f"ink={diag['width']}x{diag['height']} samples={len(samples)}", flush=True)
+            if letter:
+                row, status, _ = match_song(conn, letter)
+                return row[0] if row else auto_register_song(conn, letter, jp=letter)
+        except Exception as exc:
+            print(f'[TITLE SHAPE CSV ERROR] {type(exc).__name__}: {exc}', flush=True)
+        if frame_bgr is not None and layout is not None:
+            center_id = try_center_single_title(frame_bgr, layout, conn)
+            if center_id is not None: return center_id
+        print(f'[SONG UNKNOWN] single ink={width}x{height}', flush=True)
+        return None
+    # Choose the stronger script-consistent candidate. Japanese titles with
+    # substantial Japanese text are protected from English OCR noise.
+    choices = [c for c in (jp_candidate, en_candidate) if c]
+    if not choices:
+        print(f'[SONG UNKNOWN] ink={width}x{height}', flush=True)
+        return None
+    selected_candidate = max(choices, key=lambda c: _title_candidate_score(*c))
+    source, variant, selected = selected_candidate
+    print(f'[TITLE OCR SELECT] lang={source} variant={variant} title={selected!r} '
+          f'jp={jp!r} en={en!r}', flush=True)
+    return auto_register_song(conn, selected, jp=jp, en=en)
+
+def title_ocr_worker(crop, db_path, generation, results, frame_bgr=None, layout=None):
     """OCR and DB matching run off the capture thread; DB connection is thread-local."""
     worker_conn = None
     try:
-        worker_conn = sqlite3.connect(str(db_path))
-        song_id = identify_title(crop, worker_conn)
+        worker_conn = open_song_db(db_path)
+        song_id = identify_title(crop, worker_conn, frame_bgr, layout)
         results.put((generation, song_id, None))
     except Exception as exc:
         results.put((generation, None, str(exc)))
@@ -1148,7 +1342,7 @@ def db_command(args, conn):
         if existing:
             print(f"[ALREADY EXISTS] song_id={existing[0]} title={official!r}; no changes")
             return 0
-        conn.execute("INSERT INTO songs(official_title,ocr_title) VALUES(?,?)", (official, ocr))
+        conn.execute("INSERT INTO songs(official_title,ocr_title,ocr_title_jp,title_confirmed) VALUES(?,?,?,1)", (official, ocr, ocr))
         conn.commit()
         print(f"[SONG REGISTERED] song_id={conn.execute('SELECT last_insert_rowid()').fetchone()[0]} title={official!r}")
         return 0
@@ -1160,8 +1354,8 @@ def db_command(args, conn):
             print(f"[SONG TITLE UPDATE ERROR] song_id={song_id} not found")
             return 1
         try:
-            conn.execute("UPDATE songs SET official_title=?, ocr_title=? WHERE song_id=?",
-                         (official, ocr, song_id))
+            conn.execute("UPDATE songs SET official_title=?, ocr_title=?, ocr_title_jp=?, title_confirmed=1 WHERE song_id=?",
+                         (official, ocr, ocr, song_id))
             conn.commit()
         except sqlite3.IntegrityError as exc:
             conn.rollback()
@@ -1287,7 +1481,11 @@ def main():
     base_band = tuple(map(int, roi_data['band_y_in_roi']))
     rx, ry, rw, rh = base_roi
     band_top = base_band[0]
-    band_bottom = band_top + 20
+    band_bottom = base_band[1]
+    if not (0 <= rx < 1920 and 0 <= ry < 1080 and rw > 0 and rh > 0
+            and rx + rw <= 1920 and 0 <= band_top < band_bottom
+            and ry + band_bottom <= 1080):
+        raise ValueError('1P ROI/band is outside 1920x1080')
     roi = (rx, ry, rw, max(rh, band_bottom))
     band = (band_top, band_bottom)
     note_detector = RealtimeV5NoteDetector(roi, band)
@@ -1301,12 +1499,12 @@ def main():
     if len(roi2_source) != 4 or len(band2_source) != 2:
         raise ValueError('editor_2p ROI/band format invalid')
     r2x, r2y, r2w, r2h = map(int, roi2_source)
-    b2top = int(band2_source[0])
+    b2top, b2bottom = map(int, band2_source)
     if not (0 <= r2x < 1920 and 0 <= r2y < 1080 and r2w > 0 and r2h > 0
-            and r2x + r2w <= 1920 and 0 <= b2top and r2y + b2top + 20 <= 1080):
+            and r2x + r2w <= 1920 and 0 <= b2top and b2top < b2bottom and r2y + b2bottom <= 1080):
         raise ValueError('editor_2p ROI/band is outside 1920x1080')
-    roi2 = (r2x, r2y, r2w, max(r2h, b2top + 20))
-    band2 = (b2top, b2top + 20)
+    roi2 = (r2x, r2y, r2w, max(r2h, b2bottom))
+    band2 = (b2top, b2bottom)
     note_detector_2p = RealtimeV5NoteDetector(roi2, band2)
     print(f'[2P DETECTION CONFIG] ROI={roi2} band={band2} (horizontal provisional)', flush=True)
     random_analyzer = None
@@ -2071,7 +2269,7 @@ def main():
                                                 threading.Thread(
                                                     target=title_ocr_worker,
                                                     args=(title_crop.copy(), data_dir / DB_FILENAME,
-                                                          ocr_generation, ocr_results),
+                                                          ocr_generation, ocr_results, bgr.copy(), detected_layout),
                                                     daemon=True,
                                                     name="iidx-title-ocr",
                                                 ).start()
