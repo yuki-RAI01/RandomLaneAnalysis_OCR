@@ -19,9 +19,11 @@ FEATURE_NAMES = (['aspect', 'density'] +
 COLUMNS = ['letter', 'version', 'sample_id'] + FEATURE_NAMES
 
 
-def extract(frame, roi=DEFAULT_ROI):
+def extract(frame, roi=DEFAULT_ROI, allow_narrow=False):
     """Extract aggregate numerical descriptors from a BGR screenshot and ROI.
     Returns (features, diagnostics). Raises ValueError if not a single glyph.
+    allow_narrow=True permits very narrow glyphs such as a capital I; callers
+    should enable it only in the dedicated single-glyph workflow.
     """
     if frame is None or frame.ndim != 3:
         raise ValueError('カラー画像が必要です')
@@ -37,7 +39,8 @@ def extract(frame, roi=DEFAULT_ROI):
         raise ValueError('曲名の白い画素が見つかりません')
     l, t, r, b = int(xs.min()), int(ys.min()), int(xs.max()+1), int(ys.max()+1)
     w, h = r-l, b-t
-    if not (12 <= h <= 34 and 0.55 <= w/h <= 1.5):
+    min_aspect = 0.08 if allow_narrow else 0.55
+    if not (8 <= h <= 34 and min_aspect <= w/h <= 1.5):
         raise ValueError(f'1文字のサイズではありません: {w}x{h}')
     glyph = (mask[t:b, l:r].astype('uint8') * 255)
     # Resize to fixed dimensions, then aggregate into coarse cells.

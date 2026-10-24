@@ -43,6 +43,7 @@ class Editor:
         self.graph = tk.StringVar(value='左')
         self.letter = tk.StringVar(value='A')
         self.sample_id = tk.StringVar(value='')
+        self.allow_narrow = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value='1920×1080の画像を開いてください')
         self.frame = None
         self.photo = None
@@ -70,6 +71,7 @@ class Editor:
         ttk.Label(row, text='サンプルID:').pack(side='left', padx=(18,4))
         ttk.Entry(row, textvariable=self.sample_id, width=24).pack(side='left')
         ttk.Button(row, text='数値化', command=self.analyze).pack(side='left', padx=10)
+        ttk.Checkbutton(row, text='細い文字（Iなど）の例外を許可', variable=self.allow_narrow).pack(side='left', padx=4)
 
         self.canvas = tk.Canvas(root, bg='#1d222a', highlightthickness=0, height=560)
         self.canvas.pack(fill='both', expand=True, padx=12, pady=(8,2))
@@ -215,7 +217,7 @@ class Editor:
         if len(self.letter.get().strip())!=1:
             messagebox.showwarning('対象文字','対象文字は1文字にしてください');return
         try:
-            self.features,self.diagnostics=sf.extract(self.frame,self.roi)
+            self.features,self.diagnostics=sf.extract(self.frame,self.roi,allow_narrow=self.allow_narrow.get())
             self.persist()
             try:
                 rows=sf.read_csv(CSV_PATH)

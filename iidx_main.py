@@ -1088,6 +1088,18 @@ def _best_title_candidate(candidates, language):
     return max(options, key=lambda c: (_title_candidate_score(*c),
                                       len(normalize_ocr(c[2]))))
 
+def registered_single_letter_shapes():
+    """Return letters with registered numeric shape data in the CSV."""
+    try:
+        from iidx_shape_features import read_csv
+        from iidx_paths import app_root
+        path = app_root() / "data" / "iidx_single_letter_shapes.csv"
+        return {row["letter"] for row in read_csv(path)}
+    except Exception as exc:
+        print(f"[TITLE SHAPE LETTERS WARNING] {type(exc).__name__}: {exc}", flush=True)
+        return set()
+
+
 def allowed_single_letter_symbols():
     """CSVのletter列を登録許可文字として利用。旧来の〆々は維持する。"""
     symbols = set("〆々")
@@ -1179,8 +1191,10 @@ def identify_title(crop, conn, frame_bgr=None, layout=None):
     height = info['height'] if info else None
     # Header glyphs as short as 10px were observed (雫: 23x10).
     # Use a compact bounding box AND aspect ratio, not height alone.
-    single = bool(info and 8 <= height <= 32 and 7 <= width <= 35
-                  and 0.45 <= width / height <= 2.5)
+    # Permit narrow registered single glyphs (e.g. I) to reach shape matching.
+    # The low aspect-ratio threshold is limited to compact title-glyph dimensions.
+    single = bool(info and 8 <= height <= 32 and 2 <= width <= 35
+                  and 0.08 <= width / height <= 2.5)
     outputs = {}
     en_unavailable = False
     for lang in ('ja-JP', 'en-US'):
@@ -1204,11 +1218,12 @@ def identify_title(crop, conn, frame_bgr=None, layout=None):
                 break
         outputs['tesseract-eng'] = fallback
     candidates = []
+    registered_shapes = {letter.upper() for letter in registered_single_letter_shapes()}
     for lang, results in outputs.items():
         for variant, raw, ms in results:
             value = ' '.join(raw.strip().split())
             valid = bool(value and any(ch.isalnum() or ch in allowed_single_letter_symbols() for ch in value))
-            if single and (len(value) != 1 or value.upper() in {'A', 'D', 'F', 'X', 'V', '∀'}):
+            if single and (len(value) != 1 or value.upper() in registered_shapes):
                 valid = False
             if lang != 'tesseract-eng':
                 print(f'[TITLE WINOCR] lang={lang} variant={variant} text={raw!r} '
@@ -1240,7 +1255,7 @@ def identify_title(crop, conn, frame_bgr=None, layout=None):
         try:
             from iidx_shape_features import extract, read_csv, compare
             from iidx_paths import app_root
-            features, diag = extract(crop, (0, 0, crop.shape[1], crop.shape[0]))
+            features, diag = extract(crop, (0, 0, crop.shape[1], crop.shape[0]), allow_narrow=True)
             samples = read_csv(app_root() / 'data' / 'iidx_single_letter_shapes.csv')
             letter, details = compare(features, samples)
             print(f"[TITLE SHAPE CSV] letter={letter!r} details={details} "
