@@ -97,4 +97,8 @@ pygame 2.6.1はGNU LGPL 2.1に基づいて配布されています。pygameの�
 
 ## クレジット
 
-必須ではありませんが配信などで使用される際は、ソフトウェア名(RandomLaneAnalysis_OCR)とGitHubのURL(https://github.com/yuki-RAI01/RandomLaneAnalysis_OCR/releases)を記載いただけると助かります。
+必須ではありませんが配信などで使用される際は、
+
+ソフトウェア名( RandomLaneAnalysis_OCR )と
+
+GitHubのURL( https://github.com/yuki-RAI01/RandomLaneAnalysis_OCR/releases )を記載いただけると助かります。
