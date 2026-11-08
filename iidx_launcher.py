@@ -3,6 +3,7 @@ import os
 import ctypes
 from ctypes import wintypes
 import re
+import ast
 import sys
 import queue
 import signal
@@ -105,6 +106,8 @@ class Launcher:
         self.events = queue.Queue()
         self.lines = deque(maxlen=MAX_LINES)
         self.tools = []
+        self.song_list_updating = False
+        self.song_list_prompted = False
         self.debug = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value='停止中')
         self.song = tk.StringVar(value='曲名：—')
@@ -149,15 +152,47 @@ class Launcher:
 
     def check_initial_templates(self):
         missing = [name for name, _, _ in TEMPLATE_STEPS if not (BASE / "templates" / name).is_file()]
-        if not missing:
+        if missing:
+            if len(missing) == len(TEMPLATE_STEPS):
+                msg = "テンプレート画像がありません。"
+            else:
+                msg = "以下のテンプレート画像がありません。\n\n" + "\n".join(missing)
+            msg += "\n\nゲーム画面のスクリーンショットを利用者自身で用意してください。\n\nテンプレートを登録しますか？"
+            if messagebox.askyesno("テンプレート初期設定", msg, parent=self.root):
+                self.open_template_wizard()
+        # Ask about the official song list after the initial setup prompt.
+        self.root.after(350, self.prompt_song_list_update)
+
+    def prompt_song_list_update(self):
+        if self.song_list_prompted:
             return
-        if len(missing) == len(TEMPLATE_STEPS):
-            msg = "テンプレート画像がありません。"
-        else:
-            msg = "以下のテンプレート画像がありません。\n\n" + "\n".join(missing)
-        msg += "\n\nゲーム画面のスクリーンショットを利用者自身で用意してください。\n\nテンプレートを登録しますか？"
-        if messagebox.askyesno("テンプレート初期設定", msg, parent=self.root):
-            self.open_template_wizard()
+        self.song_list_prompted = True
+        answer = messagebox.askyesno(
+            '公式楽曲リストの更新確認',
+            '公式サイトから楽曲リストを取得し、ローカルデータを更新しますか？\n\n'
+            '「いいえ」を選ぶとネットワークには接続せず、現在のローカルデータを使用します。',
+            parent=self.root, default=messagebox.NO)
+        if answer:
+            self.update_song_list()
+
+    def update_song_list(self, replace_all=False):
+        if self.song_list_updating:
+            messagebox.showinfo('更新中', '公式楽曲リストを更新しています。完了までお待ちください。', parent=self.root)
+            return
+        self.song_list_updating = True
+        self.status.set('公式楽曲リスト更新中…')
+        mode = '既存レコードを全件削除して再取得' if replace_all else '既存レコードを保持して更新'
+        self.events.put(('line', f'[SONG LIST] 公式楽曲リストの取得を開始します ({mode})'))
+        threading.Thread(target=self._song_list_update_worker,
+                         args=(replace_all,), daemon=True).start()
+
+    def _song_list_update_worker(self, replace_all=False):
+        try:
+            from iidx_song_list import update_official_song_list
+            result = update_official_song_list(replace_all=replace_all)
+            self.events.put(('song_list_result', True, result))
+        except Exception as exc:
+            self.events.put(('song_list_result', False, str(exc)))
 
     def begin_tesseract_check(self):
         if self.tesseract_checking:
@@ -305,10 +340,22 @@ class Launcher:
             self.song.set('曲名：検出中')
             self.normal.set('正規譜面：—')
             self.random.set('RANDOM分析結果：—')
-        if '[SONG IDENTIFIED]' in line:
-            match = re.search(r"\btitle=(['\"])(.*?)\1", line)
+        if '[SONG IDENTIFIED]' in line or '[TITLE OCR SELECT]' in line:
+            match = re.search(r"\btitle=('(?:\\\\.|[^'\\\\])*'|\"(?:\\\\.|[^\"\\\\])*\")", line)
             if match:
-                self.song.set('曲名：' + match.group(2))
+                try:
+                    self.song.set('曲名：' + str(ast.literal_eval(match.group(1))))
+                except (SyntaxError, ValueError):
+                    pass
+        elif '[SONG AUTO REGISTERED]' in line:
+            # A first-play provisional title is the final title decision when
+            # no canonical official-list title or existing DB row was found.
+            match = re.search(r"\bprovisional_title=('(?:\\\\.|[^'\\\\])*'|\"(?:\\\\.|[^\"\\\\])*\")", line)
+            if match:
+                try:
+                    self.song.set('曲名：' + str(ast.literal_eval(match.group(1))))
+                except (SyntaxError, ValueError):
+                    pass
         if '[CHART FOUND]' in line or '[NORMAL RECORD SKIPPED]' in line:
             self.normal.set('正規譜面：取得済み')
         elif '[NORMAL RECORD START]' in line:
@@ -357,6 +404,26 @@ class Launcher:
                     self.start_button.configure(state='disabled')
                     self.handle_line('[TESSERACT CHECK] FAILED: ' + detail.replace('\n', ' / '))
                     messagebox.showerror('Tesseract OCR の確認', detail)
+            elif event[0] == 'song_list_result':
+                _, ok, result = event
+                self.song_list_updating = False
+                if ok:
+                    self.status.set('停止中' if self.proc is None else '分析中')
+                    if result['changed']:
+                        message = (f"公式楽曲リストを更新しました。\n\n取得行数：{result['fetched']}\n"
+                                   f"登録曲数：{result['unique']}\n累計曲数：{result['total']}\n"
+                                   f"最新パック：{result['newest_pack'] or '—'}")
+                        self.handle_line('[SONG LIST] 更新あり: ' + message.replace('\n', ' / '))
+                        messagebox.showinfo('楽曲リスト更新完了', message, parent=self.root)
+                    else:
+                        self.handle_line(f"[SONG LIST] 変更なし（登録曲数：{result['total']}）")
+                        messagebox.showinfo('楽曲リスト確認完了',
+                                            f"公式楽曲リストに変更はありません。\n登録曲数：{result['total']}", parent=self.root)
+                else:
+                    self.status.set('楽曲リスト更新失敗（ローカルデータ維持）')
+                    self.handle_line('[SONG LIST ERROR] ' + str(result))
+                    messagebox.showerror('楽曲リスト更新失敗',
+                                         f"公式楽曲リストを更新できませんでした。\n既存のローカルデータは変更していません。\n\n{result}", parent=self.root)
             elif event[0] == 'hotkey':
                 if event[1] == 'start':
                     self.start()
@@ -414,13 +481,20 @@ class Launcher:
     def open_settings(self):
         win = tk.Toplevel(self.root)
         win.title('IIDX 設定ランチャー')
-        win.geometry('440x420')
+        win.geometry('440x470')
         win.transient(self.root)
         frame = ttk.Frame(win, padding=20)
         frame.pack(fill='both', expand=True)
         ttk.Label(frame, text='設定ツール', font=('', 14, 'bold')).pack(anchor='w', pady=(0, 14))
         for label, path in TOOLS:
             ttk.Button(frame, text=label, command=lambda p=path: self.launch_tool(p)).pack(fill='x', pady=5)
+        song_list_frame = ttk.Frame(frame)
+        song_list_frame.pack(fill='x', pady=(12, 5))
+        replace_all = tk.BooleanVar(value=False)
+        ttk.Checkbutton(song_list_frame, text='更新前に全件削除',
+                        variable=replace_all).pack(side='right', padx=(10, 0))
+        ttk.Button(song_list_frame, text='公式楽曲リストを手動更新',
+                   command=lambda: self.update_song_list(replace_all.get())).pack(fill='x', expand=True, pady=5)
         ttk.Button(frame, text='テンプレート作成ウィザード', command=self.open_template_wizard).pack(fill='x', pady=5)
 
         # Spout sender name: selectable/copyable, but not editable.

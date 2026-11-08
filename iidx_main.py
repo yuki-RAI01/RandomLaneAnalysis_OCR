@@ -249,10 +249,10 @@ LEVEL_ROI_BY_LAYOUT = {
 # line at the top; the artist line and difficulty/level areas are excluded.
 # ------------------------------------------------------------------
 TITLE_ROI_BY_LAYOUT = {
-    "1P_GRAPH_LEFT":  (1155, 55, 1725, 95),
-    "1P_GRAPH_RIGHT": (738, 55, 1308, 95),
-    "2P_GRAPH_LEFT":  (612, 55, 1182, 95),
-    "2P_GRAPH_RIGHT": (196, 55, 766, 95),
+    "1P_GRAPH_LEFT":  (1155, 55, 1725, 98),
+    "1P_GRAPH_RIGHT": (738, 55, 1308, 98),
+    "2P_GRAPH_LEFT":  (612, 55, 1182, 98),
+    "2P_GRAPH_RIGHT": (196, 55, 766, 98),
 }
 
 TITLE_PREVIEW_SCALE = 2
@@ -1124,7 +1124,7 @@ def auto_register_song(conn, title, jp=None, en=None):
         if not value: continue
         row, status, _ = match_song(conn, value)
         if row is not None and status == 'EXACT':
-            print(f"[SONG IDENTIFIED] song_id={row[0]} method=REGISTER/EXACT", flush=True)
+            print(f"[SONG IDENTIFIED] song_id={row[0]} title={row[1]!r} method=REGISTER/EXACT", flush=True)
             return row[0]
     rows = conn.execute('SELECT official_title,ocr_title,ocr_title_jp,ocr_title_en FROM songs').fetchall()
     nearest = max((difflib.SequenceMatcher(None, normalize_ocr(v), normalize_ocr(alias)).ratio()
@@ -1249,8 +1249,102 @@ def identify_title(crop, conn, frame_bgr=None, layout=None):
             return None
         status, lang, variant, row = group[0]
         _fill_ocr_aliases(conn, row[0], jp, en)
-        print(f'[SONG IDENTIFIED] song_id={row[0]} method=HEADER/{lang}/{variant}/{status}', flush=True)
+        print(f'[SONG IDENTIFIED] song_id={row[0]} title={row[1]!r} method=HEADER/{lang}/{variant}/{status}', flush=True)
         return row[0]
+    # Optional official song-list candidate lookup. This is title-only and
+    # does not add artist OCR passes; the separate official DB is read-only here.
+    try:
+        from iidx_song_list import (
+            DB_PATH as official_song_db_path,
+            diagnose_official_title_match,
+            match_official_title,
+        )
+        if candidates:
+            first_lang, first_variant, first_value = candidates[0]
+            first_match_value = (
+                "".join(first_value.split()) if first_lang == "ja-JP"
+                else first_value
+            )
+            first_diag = diagnose_official_title_match(
+                first_match_value, official_song_db_path)
+            print(
+                f"[OFFICIAL SONG LIST DB] path={first_diag['db_path']!r} "
+                f"exists={first_diag['db_exists']} songs={first_diag['song_count']} "
+                f"status={first_diag['status']}",
+                flush=True,
+            )
+            if first_diag.get("error"):
+                print(f"[OFFICIAL SONG LIST DB ERROR] {first_diag['error']}", flush=True)
+        else:
+            print("[OFFICIAL SONG LIST] no_valid_ocr_candidates", flush=True)
+
+        official_results = []
+        for lang, variant, value in candidates:
+            # Japanese Windows OCR often inserts spaces between individual
+            # glyphs. Remove whitespace for matching only; retain raw OCR text
+            # for aliases, diagnostics, and provisional metadata.
+            match_value = "".join(value.split()) if lang == "ja-JP" else value
+            diag = diagnose_official_title_match(match_value, official_song_db_path)
+            # Use the same normalized input and explicit DB path for diagnostics
+            # and actual matching.
+            official_title, official_status = match_official_title(
+                match_value, official_song_db_path)
+            print(
+                f"[OFFICIAL SONG LIST CANDIDATE] lang={lang} variant={variant} "
+                f"input={value!r} match_input={match_value!r} status={official_status} "
+                f"best={diag['best_title']!r} score={diag['best_score']:.3f} "
+                f"second={diag['second_title']!r} second_score={diag['second_score']:.3f} "
+                f"threshold={diag['threshold']:.2f} "
+                f"margin={diag['best_score'] - diag['second_score']:.3f}/"
+                f"{diag['margin_threshold']:.2f}",
+                flush=True,
+            )
+            if official_title:
+                official_results.append(
+                    (official_status, lang, variant, value, official_title))
+
+        # A full exact hit from any OCR candidate outranks every fuzzy hit,
+        # regardless of candidate order. Conflicting exact titles are not
+        # silently resolved.
+        exact_results = [r for r in official_results if r[0] == "EXACT"]
+        exact_titles = {r[4] for r in exact_results}
+        if len(exact_titles) > 1:
+            print(
+                f"[OFFICIAL SONG LIST EXACT CONFLICT] titles={sorted(exact_titles)!r}; "
+                "falling back to OCR",
+                flush=True,
+            )
+        else:
+            selected_result = (
+                exact_results[0] if exact_results else
+                next((r for r in official_results if r[0] == "FUZZY"), None)
+            )
+            if selected_result:
+                official_status, lang, variant, value, official_title = selected_result
+                row = conn.execute(
+                    "SELECT song_id,official_title,ocr_title FROM songs "
+                    "WHERE official_title=? COLLATE NOCASE",
+                    (official_title,)).fetchone()
+                if row:
+                    _fill_ocr_aliases(conn, row[0], jp, en)
+                    print(
+                        f'[SONG IDENTIFIED] song_id={row[0]} title={row[1]!r} '
+                        f'method=OFFICIAL_LIST/{lang}/{variant}/{official_status}',
+                        flush=True,
+                    )
+                    return row[0]
+                # Keep the existing provisional-registration behavior, but prefer
+                # the canonical official title when the official list resolved it.
+                registered = auto_register_song(conn, official_title, jp=jp or value, en=en)
+                if registered is not None:
+                    print(
+                        f'[SONG IDENTIFIED] song_id={registered} title={official_title!r} '
+                        f'method=OFFICIAL_LIST_REGISTER/{official_status}',
+                        flush=True,
+                    )
+                    return registered
+    except Exception as exc:
+        print(f'[OFFICIAL SONG LIST MATCH WARNING] {type(exc).__name__}: {exc}', flush=True)
     if single:
         try:
             from iidx_shape_features import extract, read_csv, compare
@@ -1262,7 +1356,10 @@ def identify_title(crop, conn, frame_bgr=None, layout=None):
                   f"ink={diag['width']}x{diag['height']} samples={len(samples)}", flush=True)
             if letter:
                 row, status, _ = match_song(conn, letter)
-                return row[0] if row else auto_register_song(conn, letter, jp=letter)
+                if row:
+                    print(f"[SONG IDENTIFIED] song_id={row[0]} title={row[1]!r} method=SHAPE/{status}", flush=True)
+                    return row[0]
+                return auto_register_song(conn, letter, jp=letter)
         except Exception as exc:
             print(f'[TITLE SHAPE CSV ERROR] {type(exc).__name__}: {exc}', flush=True)
         if frame_bgr is not None and layout is not None:

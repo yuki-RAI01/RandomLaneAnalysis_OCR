@@ -34,6 +34,9 @@ __pycache__/
 # Initial chart database pending rights review
 /data/iidx_songs.sqlite3
 
+# Official Song List
+/data/iidx_official_song_list*.sqlite3
+
 # Audit files
 /dist_folder_list.txt
 /source_folder_list.txt
